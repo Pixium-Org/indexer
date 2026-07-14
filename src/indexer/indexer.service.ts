@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { PixelPlacedHandler } from '../events/handlers/pixel-placed.handler';
 import { decodeEvent } from '../events/decode-event';
 import { StellarService } from '../stellar/stellar.service';
+import { CursorRepository } from './cursor.repository';
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const EVENTS_PER_POLL = 100;
@@ -20,17 +21,17 @@ function sleep(ms: number): Promise<void> {
  * Polls the Stellar RPC for canvas contract events and dispatches them
  * to the matching handler.
  *
- * The cursor is kept in memory only for now — a restart re-polls from
- * `START_LEDGER` (or the current latest ledger, if unset) rather than
- * resuming. Persisting the cursor in Postgres is a separate follow-up
- * slice; see the README's "Resumability" section for the intended
- * behavior once that lands.
+ * The cursor is persisted in Postgres (via `CursorRepository`), keyed by
+ * contract, so a restart resumes from the last successfully processed
+ * position instead of re-polling from `START_LEDGER` every time. See the
+ * README's "Resumability" section.
  */
 @Injectable()
 export class IndexerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(IndexerService.name);
   private readonly pollIntervalMs: number;
   private readonly startLedger?: number;
+  private readonly contractId: string;
   private cursor?: string;
   private stopped = false;
   private loop?: Promise<void>;
@@ -38,6 +39,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly stellar: StellarService,
     private readonly pixelPlacedHandler: PixelPlacedHandler,
+    private readonly cursorRepository: CursorRepository,
     private readonly config: ConfigService,
   ) {
     const configuredInterval = this.config.get<string>('POLL_INTERVAL_MS');
@@ -49,10 +51,25 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     this.startLedger = configuredStartLedger
       ? Number(configuredStartLedger)
       : undefined;
+
+    this.contractId = this.config.getOrThrow<string>('CONTRACT_ID');
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    await this.loadCursor();
     this.loop = this.runLoop();
+  }
+
+  /** Loads the persisted cursor for this contract. Exposed for testing. */
+  async loadCursor(): Promise<void> {
+    this.cursor = await this.cursorRepository.get(this.contractId);
+    this.logger.log(
+      this.cursor
+        ? `Resuming from persisted cursor`
+        : `No persisted cursor found, starting from startLedger=${
+            this.startLedger ?? 'latest'
+          }`,
+    );
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -91,6 +108,7 @@ export class IndexerService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.cursor = response.cursor;
+    await this.cursorRepository.set(this.contractId, this.cursor);
   }
 
   private dispatch(event: Parameters<typeof decodeEvent>[0]): void {

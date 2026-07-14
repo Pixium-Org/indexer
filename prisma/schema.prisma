@@ -1,0 +1,22 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Tracks the last-processed Stellar RPC event cursor per contract, so
+/// the indexer can resume after a restart instead of re-polling from
+/// the configured START_LEDGER every time.
+model IndexerCursor {
+  /// The contract this cursor tracks progress for. One row per
+  /// contract, so a single indexer instance can eventually track
+  /// multiple contracts (canvas, quests, ...) independently.
+  contractId String   @id @map("contract_id")
+  cursor     String
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("indexer_cursors")
+}
